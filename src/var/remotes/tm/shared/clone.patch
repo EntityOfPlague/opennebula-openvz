@@ -1,0 +1,11 @@
+--- clone.4.2	2013-07-24 20:37:11.000000000 +0400
++++ clone.4.2.new	2013-09-25 16:35:33.637715948 +0400
+@@ -73,7 +73,7 @@
+ *)
+     log "Cloning $SRC_PATH in $DST"
+     ssh_exec_and_log $DST_HOST \
+-                     "cd $DST_DIR; cp $SRC_PATH $DST_PATH" \
++                     "umask $(umask); cd $DST_DIR; cp $SRC_PATH $DST_PATH" \
+                      "Error copying $SRC to $DST"
+     ;;
+ esac

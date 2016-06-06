@@ -1,0 +1,74 @@
+#!/usr/bin/env ruby
+
+ONE_LOCATION=ENV["ONE_LOCATION"] if !defined?(ONE_LOCATION)
+
+if !ONE_LOCATION
+    RUBY_LIB_LOCATION="/usr/lib/one/ruby" if !defined?(RUBY_LIB_LOCATION)
+else
+    RUBY_LIB_LOCATION=ONE_LOCATION+"/lib/ruby" if !defined?(RUBY_LIB_LOCATION)
+end
+
+$: << RUBY_LIB_LOCATION
+$: << File.dirname(__FILE__) + '/../..'
+
+require 'scripts_common'
+require 'rubygems'
+require 'rexml/document'
+require "#{File.dirname(__FILE__)}/ovz_common"
+
+ENV['LANG']='C'
+
+read_shell_exports(File.join(File.dirname($0), "ovzrc"))
+
+$sudo    = ENV["SUDO"]
+$vzctl   = ENV["VZCTL"]
+$host    = ENV["HOST"]
+
+dump_file = ARGV[0]
+vm_id = ARGV[2].to_i
+
+vm_conf = read_ovz_config(ENV["DEFAULT_CT_CONF"])
+vm_conf_filename = File.join(ENV["VZ_CONF_DIR"], "#{vm_id}.conf")
+
+checkpoint_filename = ARGV[0]
+deployment_dirname = File.dirname(checkpoint_filename)
+deploy_nums = []
+Dir.glob(File.join(deployment_dirname, "deployment.*")) do |f|
+  if f =~ /\.(\d+)$/
+    deploy_nums << $1.to_i
+  end
+end
+if deploy_nums.count == 0
+  OpenNebula.error_message("deployment filename not found during restore")
+end
+deployment_filename = File.join(deployment_dirname, "deployment.#{deploy_nums.max}")
+    
+doc = REXML::Document.new(File.new(deployment_filename, "r"))
+
+vm_conf = make_vm_conf(doc, vm_conf, deployment_dirname)
+
+# Adding file to rc.local
+replace_rclocal = ""
+doc.elements.each('VM/TEMPLATE/RCLOCAL') do |rcl|
+    replace_rclocal = rcl.text
+end
+# Replace /etc/vz/conf/<id>.conf with a config supplied by ONE.
+out = `#{$sudo} #{$vzctl} status #{vm_id}`
+
+one_vm_conf_filename = File.join(deployment_dirname, "vm_conf")
+one_vm_conf_file = File.new(one_vm_conf_filename, "w")
+vm_conf.each do |key,value|
+    one_vm_conf_file.puts "#{key}=\"#{value}\""
+end
+one_vm_conf_file.close
+
+if !(`#{$sudo} #{$vzctl} status #{vm_id}` =~ /running/)
+  OpenNebula.exec_and_log("#{$sudo} cp \"#{one_vm_conf_filename}\" \"#{vm_conf_filename}\"")
+
+  if File.file?(dump_file) then
+    OpenNebula.exec_and_log("#{$sudo} #{$vzctl} restore #{vm_id} --dumpfile #{dump_file}")
+    OpenNebula.exec_and_log("rm -f #{deployment_dirname}/user_suspended")
+  else
+    OpenNebula.exec_and_log("#{$sudo} #{$vzctl} start #{vm_id}")
+  end
+end

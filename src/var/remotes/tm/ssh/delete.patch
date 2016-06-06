@@ -1,0 +1,19 @@
+--- /tmp/var/remotes/tm/ssh/delete	2012-05-25 14:19:23.833938374 +0300
++++ /home/oneadmin/one-bin/var/remotes/tm/ssh/delete	2012-05-25 13:36:56.483877546 +0300
+@@ -46,6 +46,16 @@
+ 	exit 0
+ fi
+ 
++ssh_exec_and_log $DST_HOST \
++  "LOOP_COUNT=0
++   while [ -d "$DST_PATH/private" ]; do
++     sleep 1
++     LOOP_COUNT=$[$LOOP_COUNT + 1]
++     if [ $LOOP_COUNT -ge 60 ]; then
++       break
++     fi
++   done"
++
+ log "Deleting $DST_PATH"
+ ssh_exec_and_log $DST_HOST "rm -rf $DST_PATH" "Error deleting $DST_PATH"
+ 

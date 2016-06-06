@@ -1,0 +1,61 @@
+#!/usr/bin/env ruby
+
+ONE_LOCATION=ENV["ONE_LOCATION"] if !defined?(ONE_LOCATION)
+
+if !ONE_LOCATION
+    RUBY_LIB_LOCATION="/usr/lib/one/ruby" if !defined?(RUBY_LIB_LOCATION)
+else
+    RUBY_LIB_LOCATION=ONE_LOCATION+"/lib/ruby" if !defined?(RUBY_LIB_LOCATION)
+end
+
+$: << RUBY_LIB_LOCATION
+$: << File.dirname(__FILE__) + '/../..'
+
+require 'scripts_common'
+require 'rubygems'
+require "#{File.dirname(__FILE__)}/ovz_common"
+
+ENV['LANG']='C'
+
+read_shell_exports(File.join(File.dirname($0), "ovzrc"))
+
+$vz_conf   = read_ovz_config(ENV["VZ_CONF"])
+$ssh       = ENV["SSH"]
+$sudo      = ENV["SUDO"]
+$vzmigrate = ENV["VZMIGRATE"]
+$conf_dir  = ENV["VZ_CONF_DIR"]
+$vz_conf_name = "/etc/vz/vz.conf"
+$deploy_id = ARGV[0]
+$dest_host = ARGV[1]
+
+vm_conf_file = File.join($conf_dir, "#{$deploy_id}.conf")
+vm_conf = read_ovz_config(vm_conf_file)
+vm_path = File.dirname(vm_conf["VE_PRIVATE"])
+vm_root = File.dirname(vm_conf["VE_ROOT"])
+
+user  = `#{$ssh} #{$dest_host} "id -u"`.to_i
+group = `#{$ssh} #{$dest_host} "id -g"`.to_i
+
+OpenNebula.exec_and_log("#{$sudo} modprobe vzcpt")
+OpenNebula.exec_and_log("#{$sudo} modprobe vzrst")
+
+OpenNebula.exec_and_log("#{$sudo} #{$ssh} #{$dest_host} \"modprobe vzcpt\"")
+OpenNebula.exec_and_log("#{$sudo} #{$ssh} #{$dest_host} \"modprobe vzrst\"")
+
+#OpenNebula.exec_and_log("#{$sudo} #{$vzmigrate} --online -r no --remote-private='#{vm_path}/private'  --remote-root='#{vm_path}/root' #{$dest_host} #{$deploy_id}",
+#                        "Could not migrate #{$deploy_id} to #{$dest_host}")
+
+OpenNebula.exec_and_log("#{$sudo} #{$ssh} #{$dest_host} \"echo \"VE_PRIVATE=#{vm_path}/private\" >> #{$vz_conf_name}\"")
+OpenNebula.exec_and_log("#{$sudo} #{$ssh} #{$dest_host} \"echo \"VE_ROOT=#{vm_path}/root\" >> #{$vz_conf_name}\"")
+
+OpenNebula.exec_and_log("#{$sudo} #{$vzmigrate} --online #{$dest_host} #{$deploy_id}",
+                        "Could not migrate #{$deploy_id} to #{$dest_host}")
+
+OpenNebula.exec_and_log("#{$sudo} #{$ssh} #{$dest_host} \"head -n -2 #{$vz_conf_name} >> #{$vz_conf_name}.tmp\"")
+OpenNebula.exec_and_log("#{$sudo} #{$ssh} #{$dest_host} \"mv #{$vz_conf_name}.tmp #{$vz_conf_name}\"")
+
+OpenNebula.exec_and_log("#{$sudo} scp -r #{vm_path}/* #{$dest_host}:#{vm_path}")
+OpenNebula.exec_and_log("#{$sudo} rm -rf #{vm_path}")
+OpenNebula.exec_and_log("#{$sudo} #{$ssh} #{$dest_host} \"chown #{user}:#{group} #{vm_path}\"")
+OpenNebula.exec_and_log("#{$sudo} #{$ssh} #{$dest_host} \"chown #{user}:#{group} #{vm_path}/root\"")
+OpenNebula.exec_and_log("#{$sudo} #{$ssh} #{$dest_host} \"chown #{user}:#{group} -R \\$(find #{vm_path}/* |grep -v root)\"")

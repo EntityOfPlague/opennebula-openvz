@@ -1,0 +1,227 @@
+#!/usr/bin/env ruby
+
+ONE_LOCATION=ENV["ONE_LOCATION"] if !defined?(ONE_LOCATION)
+
+if !ONE_LOCATION
+    RUBY_LIB_LOCATION="/usr/lib/one/ruby" if !defined?(RUBY_LIB_LOCATION)
+else
+    RUBY_LIB_LOCATION=ONE_LOCATION+"/lib/ruby" if !defined?(RUBY_LIB_LOCATION)
+end
+
+$: << RUBY_LIB_LOCATION
+$: << File.dirname(__FILE__) + '/../..'
+
+
+require 'scripts_common'
+require 'rubygems'
+require 'rexml/document'
+require "#{File.dirname(__FILE__)}/ovz_common"
+
+ENV['LANG']='C'
+
+read_shell_exports(File.join(File.dirname($0), "ovzrc"))
+
+$vz_conf = read_ovz_config(ENV["VZ_CONF"])
+$sudo    = ENV["SUDO"]
+$vzctl   = ENV["VZCTL"]
+$vzlist  = ENV["VZLIST"]
+$mnt_dir = ENV["HOST_MNT_DIR"]
+$ctx_dir = ENV["CT_CONTEXT_DIR"]
+$host    = ENV["HOST"]
+
+# Read default config.  We will populate it with VM-specific information as we
+# parse the input XML.
+vm_conf = read_ovz_config(ENV["DEFAULT_CT_CONF"])
+
+# If we are deploying the VM, we see its config for the first time, so we write
+# it to deployment file.
+$script_name = $0
+if $script_name =~ /deploy$/
+    deployment_filename = ARGV[0]
+    deployment_dirname = File.dirname(deployment_filename)
+    deployment_file = File.new(deployment_filename, "w")
+    xml_lines = STDIN.readlines
+    xml_lines.each do |line|
+        deployment_file.puts line
+    end
+    deployment_file.close
+elsif $script_name =~ /restore$/
+    checkpoint_filename = ARGV[0]
+    deployment_dirname = File.dirname(checkpoint_filename)
+    deploy_nums = []
+    Dir.glob(File.join(deployment_dirname, "deployment.*")) do |f|
+        if f =~ /\.(\d+)$/
+            deploy_nums << $1.to_i
+        end
+    end
+    if deploy_nums.count == 0
+        OpenNebula.error_message("deployment filename not found during restore")
+    end
+    deployment_filename = File.join(deployment_dirname, "deployment.#{deploy_nums.max}")
+else
+    OpenNebula.error_message("invalid script filename: #{$0}")
+end
+
+# We are be deploying or restoring the VM.  Read its XML config.
+doc = REXML::Document.new(File.new(deployment_filename, "r"))
+
+vm_conf = make_vm_conf(doc, vm_conf, deployment_dirname)
+
+vm_tarball = ""
+doc.elements.each('VM/TEMPLATE/DISK[translate(TYPE,"SWAP","swap") != "swap"]/DISK_ID') do |disk_id|
+    vm_tarball = File.join(deployment_dirname, "disk.#{disk_id.text}")
+end
+
+# Prepare context file
+context_target = ""
+doc.elements.each('VM/TEMPLATE/CONTEXT/TARGET') do |ctx_target|
+    context_target = File.join(deployment_dirname, 'root', 'dev', ctx_target.text)
+end
+    
+vm_id = 1000
+doc.elements.each('VM/TEMPLATE/VMID') do |vmid|
+    vm_id += vmid.text.to_i
+end
+
+# Adding file to rc.local
+replace_rclocal = ""
+doc.elements.each('VM/TEMPLATE/RCLOCAL') do |rcl|
+    replace_rclocal = rcl.text
+end
+
+vm_conf_filename = File.join(ENV["VZ_CONF_DIR"], "#{vm_id}.conf")
+if File.exists?(vm_conf_filename)
+    if File.exists?(vm_conf["VE_PRIVATE"])
+        OpenNebula.exec_and_log("#{$sudo} #{$vzctl} start #{vm_id}")
+	puts vm_id
+    else
+        OpenNebula.error_message("vm_conf file #{vm_conf_filename} already exists, but there is no private area found")
+    end
+    exit
+end
+
+ve_layout = "ploop"
+doc.elements.each('VM/USER_TEMPLATE/VE_LAYOUT') do |vel|
+    ve_layout = vel.text
+end
+
+user  = File.stat("#{deployment_dirname}").uid
+group = File.stat("#{deployment_dirname}").gid
+compress = guess_tarball_type(vm_tarball)
+
+container_type = nil
+doc.elements.each('VM/USER_TEMPLATE/ARCHIVE_CONTENT_TYPE') do |type|
+    container_type = type.text.to_sym
+end
+
+if container_type == nil
+    container_type = guess_container_type(vm_tarball, compress)
+    OpenNebula.log_info("Trying to guess container type: #{container_type}")
+end
+
+if $script_name =~ /deploy$/
+    tarball_filename = File.join($vz_conf["TEMPLATE"], "cache", vm_conf["OSTEMPLATE"] + ".tar.gz")
+
+    # Create /home/vz/template/cache/XXX.tar.gz symlink so as to omit downloading template in case it is not present
+    tarball_filename_temp = tarball_filename + "." + Time.now.to_i.to_s
+    OpenNebula.exec_and_log("#{$sudo} mv \"#{tarball_filename}\" \"#{tarball_filename_temp}\" 2> /dev/null; true")
+    create_symlink(vm_tarball, tarball_filename)
+
+    OpenNebula.log("Starting conatainer")
+    
+    if ve_layout == "ploop" and container_type == :simfs
+	OpenNebula.exec_and_log("#{$sudo} #{$vzctl} create #{vm_id} " +
+                              "--layout ploop " +
+			      "--ostemplate \"#{vm_conf["OSTEMPLATE"]}\" " +
+			      "--private \"#{vm_conf["VE_PRIVATE"]}\" " +
+			      "--root \"#{vm_conf["VE_ROOT"]}\" " +
+	                      "--diskspace \"#{vm_conf["DISKSPACE"]}\"")
+	
+    else
+        OpenNebula.exec_and_log("#{$sudo} #{$vzctl} create #{vm_id} " +
+	                      "--layout simfs " +
+			      "--ostemplate \"#{vm_conf["OSTEMPLATE"]}\" " +
+			      "--private \"#{vm_conf["VE_PRIVATE"]}\" " +
+			      "--root \"#{vm_conf["VE_ROOT"]}\" " +
+	                      "--diskspace \"#{vm_conf["DISKSPACE"]}\"")
+    end
+    
+#    if ve_layout == "ploop"
+#      OpenNebula.exec_and_log("#{$sudo} #{$vzctl} set #{vm_id} --diskspace #{vm_conf["DISKSPACE"]} --save")
+#    end
+    
+    # Put ploop disk into disk.0 if we are deploying for the first time 
+    # using directory sturcuture archive and want to use ploop
+#    if container_type == :simfs and ve_layout == "ploop"
+	#OpenNebula.exec_and_log("#{$sudo} tar -cf \"#{vm_tarball}\" " +
+        #                "--#{compress.to_s} -Sp " +
+        #                "-C \"#{vm_conf["VE_PRIVATE"]}\" . --ignore-failed-read")
+    #end
+    
+    # Remove /home/vz/template/cache/XXX.tar.gz symlink
+    OpenNebula.exec_and_log("#{$sudo} rm -f \"#{tarball_filename}\"")
+    OpenNebula.exec_and_log("#{$sudo} mv \"#{tarball_filename_temp}\" \"#{tarball_filename}\" 2> /dev/null; true")
+    
+end
+
+# Replace /etc/vz/conf/<id>.conf with a config supplied by ONE.
+one_vm_conf_filename = File.join(deployment_dirname, "vm_conf")
+one_vm_conf_file = File.new(one_vm_conf_filename, "w")
+vm_conf.each do |key,value|
+    one_vm_conf_file.puts "#{key}=\"#{value}\""
+end
+one_vm_conf_file.close
+
+OpenNebula.exec_and_log("#{$sudo} cp \"#{one_vm_conf_filename}\" \"#{vm_conf_filename}\"")
+
+# Perform contextualization
+iso_files = Dir.glob("#{deployment_dirname}/*.iso")
+if context_target == ""
+    OpenNebula.log_info("Not performing contextualization, no context given.")
+elsif iso_files.size == 0
+    OpenNebula.error_message("No ISO context file in #{deployment_dirname}.")
+elsif iso_files.size > 1
+    # TODO: check each iso file contents to match list from config
+    OpenNebula.error_message("Contextualization error.  More than one iso image in #{deployment_dirname}.")
+else
+    OpenNebula.exec_and_log("#{$sudo} vzctl mount #{vm_id}")
+    if File.exists?(context_target)
+        OpenNebula.log_info("Contextualization warning.  Target device #{File.basename(context_target)} exists in #{vm_id}")
+    else
+        full_context_path = File.join(deployment_dirname, 'root', $ctx_dir)
+
+        # Create full path to the context directory, but remove the directory itself
+        `#{$sudo} mkdir -p \"#{full_context_path}\"` if not File.exists?(full_context_path)
+        `#{$sudo} rm -r \"#{full_context_path}\"`
+
+        `#{$sudo} mkdir -p \"#{$mnt_dir}\"` if not File.exists?($mnt_dir)
+        if not File.directory?($mnt_dir)
+            OpenNebula.error_message("Can't access directory #{$mnt_dir} on working node for mounting: file exists.")
+        end
+
+        OpenNebula.exec_and_log("#{$sudo} mount -o loop \"#{iso_files.first}\" \"#{$mnt_dir}\"")
+        OpenNebula.exec_and_log("#{$sudo} cp -r \"#{$mnt_dir}\" \"#{full_context_path}\"")
+        OpenNebula.exec_and_log("#{$sudo} umount \"#{$mnt_dir}\"")
+
+        if replace_rclocal != ""
+            OpenNebula.log_info("Contextualization: overriding rc.local")
+            replace_rclocal = File.join(full_context_path, replace_rclocal)
+            rclocal_path = File.join(deployment_dirname, "root", "etc", "rc.local")
+            OpenNebula.exec_and_log("#{$sudo} cp \"#{replace_rclocal}\" \"#{rclocal_path}\"")
+            OpenNebula.exec_and_log("#{$sudo} chmod 755 \"#{rclocal_path}\"")
+        end
+    end
+    OpenNebula.exec_and_log("#{$sudo} vzctl umount #{vm_id}")
+end
+
+# We don't chown private directory in case of simfs in order not to break file permissions. It leads to inability to
+# perform offline migration with simfs
+
+if ve_layout == "ploop"
+    OpenNebula.exec_and_log("#{$sudo} chown #{user}:#{group} -R #{deployment_dirname}/private")
+end
+
+OpenNebula.exec_and_log("#{$sudo} #{$vzctl} start #{vm_id}")
+OpenNebula.exec_and_log("#{$sudo} chown #{user}:#{group} #{deployment_dirname}/root")
+
+puts vm_id

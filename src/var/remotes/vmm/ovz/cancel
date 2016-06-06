@@ -1,0 +1,39 @@
+#!/usr/bin/env ruby
+
+ONE_LOCATION=ENV["ONE_LOCATION"] if !defined?(ONE_LOCATION)
+
+if !ONE_LOCATION
+    RUBY_LIB_LOCATION="/usr/lib/one/ruby" if !defined?(RUBY_LIB_LOCATION)
+else
+    RUBY_LIB_LOCATION=ONE_LOCATION+"/lib/ruby" if !defined?(RUBY_LIB_LOCATION)
+end
+
+$: << RUBY_LIB_LOCATION
+$: << File.dirname(__FILE__) + '/../..'
+
+require 'scripts_common'
+require 'rubygems'
+require "#{File.dirname(__FILE__)}/ovz_common"
+
+ENV['LANG']='C'
+
+vm_id = ARGV[0]
+
+read_shell_exports(File.join(File.dirname($0), "ovzrc"))
+
+$sudo    = ENV["SUDO"]
+$vzctl   = ENV["VZCTL"]
+$vzlist  = ENV["VZLIST"]
+
+OpenNebula.exec_and_log("#{$sudo} #{$vzctl} stop #{vm_id}")
+
+vm_conf_filename = File.join(ENV["VZ_CONF_DIR"], "#{vm_id}.conf")
+vm_conf = read_ovz_config(vm_conf_filename)
+
+OpenNebula.exec_and_log("#{$sudo} #{$vzctl} destroy #{vm_id}")
+
+vm_conf_filename = vm_conf_filename + ".destroyed"
+if File.exists?(vm_conf_filename)
+    OpenNebula.exec_and_log("#{$sudo} rm -f \"#{vm_conf_filename}\"")
+end
+

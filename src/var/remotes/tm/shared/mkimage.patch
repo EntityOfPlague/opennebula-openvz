@@ -1,0 +1,11 @@
+diff -uNr four-bin/var/remotes/tm/shared/mkimage one-bin/var/remotes/tm/shared/mkimage
+--- four-bin/var/remotes/tm/shared/mkimage»·····2012-11-02 19:05:21.252907844 +0200
++++ one-bin/var/remotes/tm/shared/mkimage»······2012-11-02 16:13:46.217461756 +0200
+@@ -63,6 +63,7 @@
+ MKFS_CMD=`mkfs_command $DST_PATH $FSTYPE $SIZE`
+  
+ MKSCRIPT=$(cat <<EOF
++umask $(umask)
+ export PATH=/usr/sbin:/sbin:\$PATH
+ $CREATE_IMAGE
+ $MKFS_CMD

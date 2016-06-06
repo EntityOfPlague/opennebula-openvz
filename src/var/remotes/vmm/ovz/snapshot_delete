@@ -1,0 +1,30 @@
+#!/usr/bin/env ruby
+
+ONE_LOCATION=ENV["ONE_LOCATION"] if !defined?(ONE_LOCATION)
+
+if !ONE_LOCATION
+    RUBY_LIB_LOCATION="/usr/lib/one/ruby" if !defined?(RUBY_LIB_LOCATION)
+else
+    RUBY_LIB_LOCATION=ONE_LOCATION+"/lib/ruby" if !defined?(RUBY_LIB_LOCATION)
+end
+
+$: << RUBY_LIB_LOCATION
+$: << File.dirname(__FILE__) + '/../..'
+
+require 'scripts_common'
+require 'rubygems'
+require "#{File.dirname(__FILE__)}/ovz_common"
+
+ENV['LANG']='C'
+
+vm_id = ARGV[0]
+snapshot_name = ARGV[1]
+
+read_shell_exports(File.join(File.dirname($0), "ovzrc"))
+
+$sudo    = ENV["SUDO"]
+$vzctl   = ENV["VZCTL"]
+
+OpenNebula.exec_and_log("#{$sudo} #{$vzctl} snapshot-delete #{vm_id} --id #{snapshot_name}")
+
+exit 0

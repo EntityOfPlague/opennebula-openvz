@@ -1,0 +1,201 @@
+#!/usr/bin/env ruby
+
+# -------------------------------------------------------------------------- #
+# Copyright 2002-2012, OpenNebula Project Leads (OpenNebula.org)             #
+#                                                                            #
+# Licensed under the Apache License, Version 2.0 (the "License"); you may    #
+# not use this file except in compliance with the License. You may obtain    #
+# a copy of the License at                                                   #
+#                                                                            #
+# http://www.apache.org/licenses/LICENSE-2.0                                 #
+#                                                                            #
+# Unless required by applicable law or agreed to in writing, software        #
+# distributed under the License is distributed on an "AS IS" BASIS,          #
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.   #
+# See the License for the specific language governing permissions and        #
+# limitations under the License.                                             #
+#--------------------------------------------------------------------------- #
+
+require 'pp'
+
+ENV['LANG']='C'
+
+# Read exports from shell script
+def read_shell_exports(filename)
+    file = File.new(filename)
+    while line = file.gets
+        if line =~ /^\s*export\s+(\w+)=(.*)/
+            # TODO: check if there's already such variable defined
+            ENV[$1] = $2
+        end
+    end
+end
+
+def get_vm_resources_info(vm_id)
+    out = `#{$sudo} /bin/cat /proc/vz/vestat`
+    return nil if $?.exitstatus != 0
+
+    out.split(/\n/).each do |line|
+        if line =~ /^\s*#{vm_id}\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/
+            return { :user => $1.to_i, :system => $3.to_i, :uptime => $4.to_i }
+        end
+    end
+    return nil
+end
+
+def get_vm_info(vm_id)
+    out = `#{$sudo} #{$vzctl} status #{vm_id}`
+    return { :state => '-' } if $?.exitstatus != 0
+
+    status = Hash.new
+
+    # TODO: check
+    status[:state] = '-'
+    #if out =~ /suspended/
+
+    if !(out =~ /running/)
+        if File.file?("user_suspended")
+            status[:state] = 'p'
+        end
+    elsif out =~ /running/
+        status[:state] = 'a'
+    end
+
+    running = false
+    if out =~ /running/
+        running = true
+    end
+
+    if status[:state] == 'a' && running
+        # default values
+        status[:cpu] = 0.0
+        status[:net_tx] = 0
+        status[:net_rx] = 0
+        status[:memory] = 0
+
+        # compute USEDCPU using a derivative from kernel jiffies
+        res1 = get_vm_resources_info(vm_id)
+        sleep 1
+        res2 = get_vm_resources_info(vm_id)
+
+        if !res1 || !res2
+            return status
+        end
+
+        status[:cpu] = (100.0 * (res2[:user] + res2[:system] - res1[:user] - res1[:system])) /
+                           (res2[:uptime] - res1[:uptime])
+
+        # compute network activity in container
+        out = `#{$sudo} #{$vzctl} exec #{vm_id} /bin/cat /proc/net/dev`
+        return status if $?.exitstatus != 0
+
+        out.split(/\n/).each do |line|
+            if line =~ /^\s*venet[^\s]*\s+(.+)/
+                fields = $1.split(/\s+/)
+                status[:net_rx] = fields[0].to_i
+                status[:net_tx] = fields[8].to_i
+            end
+        end
+
+        # computer container memory usage
+        out = `#{$sudo} #{$vzctl} exec #{vm_id} free -k`
+        return status if $?.exitstatus != 0
+
+        out.split(/\n/).each do |line|
+            if line =~ /^Mem:\s+\d+\s+(\d+)/
+                status[:memory] = $1.to_i
+            end
+        end
+    end
+
+    status
+end
+
+def print_data(name, value)
+    if value
+        "#{name.to_s.upcase}=#{value}"
+    else
+        nil
+    end
+end
+
+def print_one_vm_info(vm_id)
+    info = get_vm_info(vm_id)
+
+    exit(-1) if !info
+
+    values = info.map do |key, value|
+        print_data(key, value)
+    end
+
+    puts values.zip.join(' ')
+end
+
+def get_all_vm_info
+    info = Hash.new
+    out = `#{$sudo} #{$vzlist} -a`
+    return nil if $?.exitstatus != 0
+    return nil if out == ""
+    out.split(/\n/)[1..-1].each do |line|
+      if line !~ /stopped/
+        if line =~ /^\s*(\d+)/
+            vm_id = $1
+            info[vm_id] = get_vm_info(vm_id)
+            #info[vm_id][:name] = vm_id
+        end
+      end
+    end
+    info
+end
+
+def print_all_vm_info()
+    require 'yaml'
+    require 'base64'
+
+    vms = get_all_vm_info
+
+    puts Base64.encode64(vms.to_yaml).delete("\n")
+end
+
+def print_all_vm_template()
+    vms=get_all_vm_info
+    if vms!=nil
+        puts "VM_POLL=YES"
+        vms.each do |name, data|
+            number = -1
+
+            if (name =~ /^one-\d*$/)
+                number = name.split('-').last
+            end
+            number = name.to_i-1000
+            string="VM=[\n"
+            string<<"  ID=#{number},\n"
+            string<<"  DEPLOY_ID=#{name},\n"
+
+            values=data.map do |key, value|
+                print_data(key, value)
+            end
+
+            monitor=values.zip.join(' ')
+
+            string<<"  POLL=\"#{monitor}\" ]"
+
+            puts string
+        end
+    end
+end
+
+vm_id = ARGV[0]
+
+read_shell_exports(File.join(File.dirname($0), "ovzrc"))
+
+$sudo    = ENV["SUDO"]
+$vzctl   = ENV["VZCTL"]
+$vzlist  = ENV["VZLIST"]
+
+if vm_id
+    print_one_vm_info(vm_id.to_i+1000)
+else
+    print_all_vm_template()
+    #print_all_vm_info()
+end
